@@ -2,6 +2,9 @@
 __pycache__/
 *.py[codz]
 *$py.class
+*.pyc
+*.pyo 
+.ipynb_checkpoints/
 
 # C extensions
 *.so
@@ -21,6 +24,10 @@ sdist/
 var/
 wheels/
 share/python-wheels/
+data/
+checkpoints/
+logs/
+wandb/
 *.egg-info/
 .installed.cfg
 *.egg
