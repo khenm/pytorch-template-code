@@ -1,2 +1,2 @@
 # template-code
-Template Code for AI 
+Template Code for Pytorch
