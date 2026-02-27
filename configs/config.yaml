@@ -1,19 +1,27 @@
-experiment_name: "baseline_experiment"
-seed: 42
-device: "cuda"
+model: "resnet18"
+data: "dummy"
 
-# avoid hardcoding paths in the code
-data:
-  path: "data/processed"
-  batch_size: 32
-  num_workers: 4
+training: 
+  epochs: 5
+  lr: 1e-4
+  batch_size: 128
+  train_batch_size: 256
+  val_batch_size: 128
+  num_workers: 2
+  persistent_workers: false
+  weight_decay: 1.0e-5
+  patience: 3
+  seed: 42
+  find_unused_parameters: false
 
-model:
-  name: "ResNet18"
-  input_channels: 3
-  num_classes: 10
+  # save
+  save_dir: "runs" 
+  checkpoint_dir: "checkpoints" 
+  resume_path: null 
 
-training:
-  epochs: 50
-  learning_rate: 0.001
-  save_dir: "checkpoints/"
+loss:
+  types: ["CrossEntropy"]
+
+wandb:
+  enable: false
+  project: "pytorch-template-test"
