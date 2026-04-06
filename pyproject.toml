@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pytorch-template-code"
 version = "0.1.0"
-description = "A clean generic PyTorch template for computer vision tasks."
+description = "A clean generic PyTorch template for research."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,7 +16,12 @@ dependencies = [
     "tqdm",
     "pandas",
     "pyyaml",
-    "wandb",
+    "hydra-core>=1.3.2",
+    "omegaconf>=2.3.0",
+    "fvcore",
+    "wcmatch",
+    "tensorboard",
+    "iopath",
 ]
 
 

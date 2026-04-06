@@ -1,245 +1,171 @@
-# PyTorch Template Code
+# PyTorch Training Template
 
-A clean, generic PyTorch template designed for computer vision tasks. This repository provides a robust foundation for deep learning projects with built-in support for distributed training, experiment tracking, and automated checkpoint management.
+A clean, general-purpose PyTorch DDP/FSDP training template for deep learning research. Built around composable Hydra configs and the `_target_` instantiation pattern — every component (model, loss, optimizer, scheduler, dataloader, logger) is swappable via config without touching Python code.
 
 ## Features
 
-- **Configuration-Driven:** Manage experiments cleanly with YAML configurations.
-- **Distributed Training:** Out-of-the-box support for Distributed Data Parallel (DDP).
-- **Experiment Tracking:** Seamless integration with Weights & Biases (`wandb`).
-- **Resilient Checkpointing:** Automated `TrainerState` management with auto-discovery and state resumption.
-- **Modular Registry:** Dynamically build models, losses, dataloaders, and metrics via registries.
+- **Composable Hydra configs** — swap model, data, optimizer, and loss from the CLI with no code changes
+- **DDP + FSDP** — select strategy via `distributed.strategy: ddp|fsdp` in config
+- **`self.where` scheduler convention** — all schedulers take a single `float ∈ [0,1]` representing training progress; linear warmup → cosine decay out of the box
+- **Gradient accumulation** — `accum_steps` chunks batches and uses `model.no_sync()` to suppress redundant all-reduce
+- **AMP** — bfloat16/float16 via `torch.amp.autocast`; preprocessing runs in fp32
+- **Robust checkpointing** — backup-swap write pattern survives preemptions; auto-resumes from `checkpoint.pt`
+- **Per-module gradient clipping** — glob-pattern groups with full-coverage validation
+- **Glob-based module freezing** — patterns like `"*encoder*"` lock params and patch `.train()` permanently
+- **Rank-0 only I/O** — all saves, summaries, and TensorBoard writes are gated on rank 0
 
 ## Installation
 
-This project targets Python 3.10+ and uses `uv` with `pyproject.toml` for modern, fast dependency management.
+Requires Python 3.10+ and [`uv`](https://github.com/astral-sh/uv).
 
 ```bash
-# Clone the repository
 git clone https://github.com/username/pytorch-template-code.git
 cd pytorch-template-code
+uv sync
 ```
 
 ## Project Structure
 
 ```text
 pytorch-template-code/
-├── configs/              # YAML configuration files
-├── notebooks/            # Exploratory data analysis
-├── scripts/              # Executable scripts 
-│   └── train.py          # Main training entry point
-└── src/                  # Core source code
-    ├── datasets/         # Data loading and dataset definitions
-    ├── losses/           # Custom loss functions
-    ├── metrics/          # Evaluation metrics
-    ├── models/           # Neural network architectures
-    ├── registry.py       # Component builders and factory functions
-    ├── runner.py         # Workspace setup and environment initialization
-    ├── trainer.py        # Core training loop logic
-    └── utils/            # Utilities (logging, DDP, state management)
-├── pyproject.toml        # Project configuration and dependencies
-└── uv.lock               # Lock file for dependencies
+├── configs/
+│   ├── train.yaml           # Primary entry point — composes all defaults
+│   ├── data/
+│   │   └── imagenet.yaml
+│   ├── model/
+│   │   └── resnet18.yaml
+│   ├── optim/
+│   │   ├── adamw.yaml       # AdamW + linear warmup → cosine LR
+│   │   └── sgd.yaml
+│   └── loss/
+│       └── focal_loss.yaml
+├── scripts/
+│   └── train.py             # Entrypoint
+├── src/
+│   ├── datasets/
+│   │   └── dummy.py         # DummyDataset for smoke-testing
+│   ├── losses/
+│   │   ├── focal.py         # FocalLoss
+│   │   └── generic.py       # CrossEntropy, MSE wrappers
+│   ├── models/
+│   │   └── model.py         # ResNet18Model
+│   ├── utils/
+│   │   ├── checkpoint.py    # CheckpointSaver + robust_torch_save
+│   │   ├── dist.py          # Distributed rank helpers
+│   │   ├── env.py           # Environment variable setup
+│   │   ├── freeze.py        # Glob-pattern module freezing
+│   │   ├── fsdp.py          # FSDP wrapping + mixed precision policy
+│   │   ├── general.py       # AverageMeter, copy_data_to_device, seeds, …
+│   │   ├── gradient_clip.py # Per-module GradientClipper
+│   │   ├── logging.py       # Rank-aware logging setup
+│   │   ├── optimizer.py     # OptimizerWrapper + construct_optimizers
+│   │   └── tensorboard_writer.py
+│   └── trainer.py           # Core DDP/FSDP Trainer
+├── notebooks/
+│   └── 01_eda_exploration.ipynb
+├── pyproject.toml
+└── uv.lock
 ```
 
 ## Usage
 
-### Training
-
-Start a training session using the main training script. The default configuration is `configs/config.yaml`. We use `uv` to manage dependencies and run scripts. 
+### Single-GPU
 
 ```bash
-uv run scripts/train.py --config configs/config.yaml
+uv run python scripts/train.py --config train
 ```
 
-**Resume Training:**
-The runner supports intelligent auto-resumption from the latest checkpoint associated with the model in the vault.
+### Multi-GPU DDP
 
 ```bash
-uv run scripts/train.py --config configs/config.yaml --resume
+uv run torchrun --nproc_per_node=8 scripts/train.py --config train
 ```
 
-**Distributed Training (DDP):**
-To run distributed training across multiple GPUs, use `torchrun`:
+### Multi-GPU FSDP
 
 ```bash
-uv run torchrun --nproc_per_node=4 scripts/train.py --config configs/config.yaml
+uv run torchrun --nproc_per_node=8 scripts/train.py --config train distributed.strategy=fsdp
+```
+
+### Override config groups from the CLI
+
+```bash
+# Switch optimizer
+uv run torchrun --nproc_per_node=8 scripts/train.py --config train optim=sgd
+
+# Override individual values
+uv run torchrun --nproc_per_node=8 scripts/train.py --config train max_epochs=50 optim.optimizer.lr=1e-3
 ```
 
 ## Configuration
 
-The `config.yaml` controls the pipeline. Key sections:
-- `model`: Architecture target and parameters.
-- `data`: Dataset configurations.
-- `training`: Hyperparameters, learning rates, epochs, and workspace paths (`runs/`, `checkpoints/`).
-- `loss`: Active criteria registry keys.
-- `wandb`: Experiment tracking toggles and project settings.
+`configs/train.yaml` is the single entry point. It composes defaults from four groups:
 
-## FAQ
-
-<details>
-<summary><b>How to add a new model, dataset, or loss function?</b></summary>
-
-This template uses a cleaner, modular registry system (`src/registry.py`). You do not need to modify the main training loop to add new components. Just define your class and use the corresponding decorator.
-
-**1. Adding a New Model:**
-```python
-# src/models/my_model.py
-from src.registry import register_model
-import torch.nn as nn
-
-@register_model("MyNewModel")
-class MyNewModel(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        # Initialize layers...
-
-    @classmethod
-    def from_config(cls, cfg):
-        # The runner calls this method to instantiate the model
-        return cls(channels=cfg['model'].get('channels', 3))
-```
-*Tip: Ensure your new file is imported inside `src/models/__init__.py` so the decorator registers the class automatically.*
-
-**2. Adding a New Dataset:**
-```python
-# src/datasets/my_dataset.py
-from src.registry import register_dataset
-
-@register_dataset("MY_CUSTOM_DATA")
-class MyCustomDataset:
-    @classmethod
-    def get_dataloaders(cls, cfg):
-        # Build and return standard PyTorch DataLoaders
-        # return train_loader, val_loader
-        pass
-```
-
-**3. Adding a New Loss Function:**
-```python
-# src/losses/my_loss.py
-from src.registry import register_loss
-import torch.nn as nn
-
-@register_loss("MyCustomLoss")
-class MyCustomLoss(nn.Module):
-    def forward(self, pred, target):
-        loss_val = ... 
-        return loss_val
-```
-
-Once registered, you switch components entirely via `config.yaml`:
 ```yaml
-model:
-  name: "MyNewModel"
-data:
-  name: "MY_CUSTOM_DATA"
-loss:
-  types: ["MyCustomLoss"]
+defaults:
+  - data: imagenet
+  - model: resnet18
+  - optim: adamw
+  - loss: focal_loss
+  - _self_
 ```
-</details>
+
+Each group file is self-contained and fully `_target_`-driven — Hydra instantiates objects directly. To add a new variant, drop a new file in the relevant group directory.
+
+### Key top-level config keys
+
+| Key | Description |
+|-----|-------------|
+| `exp_name` | Experiment name; used in log/checkpoint paths |
+| `max_epochs` | Total training epochs |
+| `accum_steps` | Gradient accumulation steps |
+| `val_epoch_freq` | Run validation every N epochs |
+| `distributed.strategy` | `ddp` (default) or `fsdp` |
+| `checkpoint.resume_checkpoint_path` | Explicit resume path; if null, auto-discovers `checkpoint.pt` |
+| `optim.frozen_module_names` | List of glob patterns for modules to freeze |
+
+## Extending the Template
+
+### Adding a new model
+
+1. Create `src/models/my_model.py` with a plain `nn.Module` — no registry decorator needed.
+2. Add a config file `configs/model/my_model.yaml`:
+
+```yaml
+_target_: src.models.my_model.MyModel
+hidden_dim: 512
+num_layers: 6
+```
+
+3. Launch with `--config train model=my_model`.
+
+### Adding a new dataset
+
+1. Create `src/datasets/my_dataset.py` as a `torch.utils.data.Dataset`.
+2. Add `configs/data/my_dataset.yaml` with `_target_` pointing to your class.
+3. The Trainer wraps it in a `DistributedSampler` automatically.
+
+### Adding a new loss
+
+1. Create `src/losses/my_loss.py` as an `nn.Module` with a standard `forward(preds, targets)`.
+2. Add `configs/loss/my_loss.yaml` with `_target_`.
+
+### Customising the forward pass / loss computation
+
+Override `_model_inputs` and `_compute_loss` in a `Trainer` subclass:
+
+```python
+class MyTrainer(Trainer):
+    def _model_inputs(self, batch):
+        return {"images": batch["image"], "mask": batch["mask"]}
+
+    def _compute_loss(self, outputs, batch):
+        loss = self.loss_fn(outputs["logits"], batch["label"])
+        return {"loss": loss, "aux_loss": outputs["aux"]}
+```
 
 ---
 
-## 📄 Research Paper README Template
+## Research Paper README Template
 
-If you are adapting this repository for a research paper release, use the following template to ensure clarity, rigor, and reproducibility.
-
-
-# [Paper Title: Subtitle]
-
-<div align="center">
-
-[![Paper](https://img.shields.io/badge/arXiv-1234.56789-b31b1b.svg)](https://arxiv.org/abs/1234.56789)
-[![Project Page](https://img.shields.io/badge/Project-Page-blue.svg)](https://your-project-page.github.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-**[First Author]**, **[Second Author]**, **[Third Author]**
-
-**[Conference/Journal Name Year]**
-
-</div>
-
-## Description
-
-Official PyTorch implementation of **"[Paper Title]"**.
-
-[Insert a clear, concise paragraph describing the problem, the proposed method, and the primary results. Mention any state-of-the-art achievements.]
-
-<p align="center">
-  <img src="docs/teaser.png" alt="Teaser" width="80%">
-</p>
-
-## Installation
-
-This project uses `uv` for reproducible and fast dependency management.
-
-```bash
-# Clone the repository
-git clone https://github.com/username/project-name.git
-cd project-name
-
-# Install dependencies
-uv sync
-```
-
-## Data Preparation
-
-[Provide explicitly detailed instructions for downloading and preparing the datasets used in the paper. Include a tree visualization of the expected directory structure.]
-
-```text
-data/
-├── dataset_name/
-│   ├── train/
-│   ├── val/
-│   └── test/
-```
-
-## Pre-trained Models
-
-We provide pre-trained checkpoints for our models. You can download them from [Google Drive / Hugging Face](#) or use the provided script.
-
-| Model Architecture | Params (M) | Metric 1 | Metric 2 | Weights |
-|--------------------|------------|----------|----------|---------|
-| Model-Small        | 10.5       | 85.0     | 42.1     | [Link](#) |
-| Model-Large        | 85.2       | 88.5     | 55.3     | [Link](#) |
-
-## Training
-
-To reproduce the results reported in the paper, execute the training script with the corresponding configuration file.
-
-```bash
-# Standard training
-python3 scripts/train.py --config configs/model_large.yaml
-
-# Distributed Data Parallel (DDP) training on 4 GPUs
-torchrun --nproc_per_node=4 scripts/train.py --config configs/model_large.yaml
-```
-
-*Note: Training configurations are located in `configs/`. You can adjust batch size and learning rate via command-line arguments if needed.*
-
-## Evaluation
-
-To evaluate a trained model or a pre-trained checkpoint on the test set:
-
-```bash
-python3 scripts/eval.py --config configs/model_large.yaml --resume path/to/checkpoint.ckpt
-```
-
-## Citation
-
-If you use this code or our pre-trained models in your research, please cite our paper:
-
-```bibtex
-@inproceedings{author2026title,
-  title     = {Paper Title: Subtitle},
-  author    = {Author, First and Author, Second and Author, Third},
-  booktitle = {Proceedings of the [Conference Name]},
-  year      = {2026},
-  pages     = {1--10}
-}
-```
-
-## Acknowledgements
-
-[Optionally, acknowledge any fundamental repositories or codebases that your code builds upon.]
-
+If you are adapting this repository for a paper release, use the following template [PAPER.md](PAPER.md) to ensure clarity, rigor, and reproducibility.
